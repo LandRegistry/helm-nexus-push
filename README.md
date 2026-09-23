@@ -31,7 +31,7 @@ Nexus Helm repo.
 Clone the updated plugin checkout and install it with Helm:
 
 ```sh
-git clone https://github.com/sonatype-nexus-community/helm-nexus-push.git
+git clone https://github.com/LandRegistry/helm-nexus-push.git
 cd helm-nexus-push
 helm plugin install .
 helm nexus-push --help
