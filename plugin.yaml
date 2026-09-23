@@ -1,10 +1,12 @@
-name: "nexus-push"
-version: "0.0.1"
-usage: "Push chart or packaged chart to a specified repo"
-description: |-
-  Pushes a chart directory or packaged chart tgz to a specified repo,
-  either by named repo or raw URL.  It also supports basic authenticated repos.
-  See `helm nexus-push --help` for usage.
-command: "$HELM_PLUGIN_DIR/push.sh"
-useTunnel: false
-ignoreFlags: false
+apiVersion: v1
+type: cli/v1
+name: nexus-push
+version: 0.0.1
+runtime: subprocess
+config:
+  usage: Push a chart directory or package to a Nexus Helm repository
+  shortHelp: Upload Helm charts to Nexus over HTTP(S)
+  ignoreFlags: false
+runtimeConfig:
+  platformCommand:
+    - command: ${HELM_PLUGIN_DIR}/push.sh

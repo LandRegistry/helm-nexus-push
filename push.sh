@@ -15,13 +15,13 @@ Usage:
   helm nexus-push [repo] [CHART] [flags]      Pushes chart to repo
 
 Flags:
-  -u, --username string                 Username for authenticated repo (assumes anonymous access if unspecified)
-  -p, --password string                 Password for authenticated repo (prompts if unspecified and -u specified)
+  -u, --username string                 Username (uses cached login or prompts if omitted)
+  -p, --password string                 Password (uses cached login or prompts if omitted)
 EOF
 }
 
-declare USERNAME
-declare PASSWORD
+USERNAME=
+PASSWORD=
 
 declare -a POSITIONAL_ARGS=()
 while [[ $# -gt 0 ]]
@@ -32,7 +32,7 @@ do
             exit 0
             ;;
         -u|--username)
-            if [[ -z "${2:-}" ]]; then
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
                 echo "Must specify username!"
                 echo "---"
                 usage
@@ -42,7 +42,7 @@ do
             USERNAME=$1
             ;;
         -p|--password)
-            if [[ -n "${2:-}" ]]; then
+            if [[ -n "${2:-}" && "$2" != -* ]]; then
                 shift
                 PASSWORD=$1
             else
@@ -55,7 +55,11 @@ do
    esac
    shift
 done
-[[ ${#POSITIONAL_ARGS[@]} -ne 0 ]] && set -- "${POSITIONAL_ARGS[@]}" # restore positional parameters
+if [[ ${#POSITIONAL_ARGS[@]} -gt 0 ]]; then
+    set -- "${POSITIONAL_ARGS[@]}"
+else
+    set --
+fi
 
 if [[ $# -lt 2 ]]; then
   echo "Missing arguments!"
@@ -66,73 +70,95 @@ fi
 
 indent() { sed 's/^/  /'; }
 
-declare HELM3_VERSION="$(helm version --client --short | grep "v3\.")"
-
-declare REPO=$1
-declare REPO_URL="$(helm repo list | grep "^$REPO" | awk '{print $2}')/"
-
-if [[ -n $HELM3_VERSION ]]; then
-declare REPO_AUTH_FILE="$HOME/.config/helm/auth.$REPO"
-else
-declare REPO_AUTH_FILE="$(helm home)/repository/auth.$REPO"
-fi
+HELM_BIN="${HELM_BIN:-helm}"
+REPO=$1
+REPO_URL="$("$HELM_BIN" repo list | awk -v repo="$REPO" 'NR > 1 && $1 == repo { print $2; exit }')"
 
 if [[ -z "$REPO_URL" ]]; then
     echo "Invalid repo specified!  Must specify one of these repos..."
-    helm repo list
+    "$HELM_BIN" repo list
     echo "---"
     usage
     exit 1
 fi
 
-declare CMD
-declare AUTH
-declare CHART
+if [[ "$REPO_URL" != */ ]]; then
+    REPO_URL+="/"
+fi
+
+HELM_CONFIG_DIR="${HELM_CONFIG_HOME:-$("$HELM_BIN" env HELM_CONFIG_HOME)}"
+REPO_AUTH_FILE="$HELM_CONFIG_DIR/auth.$REPO"
+
+prompt_missing_credentials() {
+    if [[ -z "$USERNAME" ]]; then
+        if ! read -r -p "Username: " USERNAME; then
+            echo "No input available for username." >&2
+            return 1
+        fi
+    fi
+    if [[ -z "$PASSWORD" ]]; then
+        if ! read -r -s -p "Password: " PASSWORD; then
+            printf '\n' >&2
+            echo "No input available for password." >&2
+            return 1
+        fi
+        printf '\n'
+    fi
+}
 
 case "$2" in
     login)
-        if [[ -z "$USERNAME" ]]; then
-            read -p "Username: " USERNAME
-        fi
-        if [[ -z "$PASSWORD" ]]; then
-            read -s -p "Password: " PASSWORD
-            echo
-        fi
-        echo "$USERNAME:$PASSWORD" > "$REPO_AUTH_FILE"
+        prompt_missing_credentials
+        mkdir -p "$HELM_CONFIG_DIR"
+        (umask 077; printf '%s:%s\n' "$USERNAME" "$PASSWORD" > "$REPO_AUTH_FILE")
+        chmod 600 "$REPO_AUTH_FILE"
         ;;
     logout)
-        rm -f "$REPO_AUTH_FILE"
+        rm -f -- "$REPO_AUTH_FILE"
         ;;
     *)
-        CMD=push
         CHART=$2
 
-        if [[ -z "$USERNAME" ]] || [[ -z "$PASSWORD" ]]; then
-            if [[ -f "$REPO_AUTH_FILE" ]]; then
-                echo "Using cached login creds..."
-                AUTH="$(cat $REPO_AUTH_FILE)"
-            else
-                if [[ -z "$USERNAME" ]]; then
-                    read -p "Username: " USERNAME
+        if [[ -f "$REPO_AUTH_FILE" ]] && { [[ -z "$USERNAME" ]] || [[ -z "$PASSWORD" ]]; }; then
+            CACHED_USERNAME=
+            CACHED_PASSWORD=
+            CACHED_CREDENTIALS_USED=0
+            if IFS=: read -r CACHED_USERNAME CACHED_PASSWORD < "$REPO_AUTH_FILE"; then
+                if [[ -z "$USERNAME" && -n "$CACHED_USERNAME" ]]; then
+                    USERNAME=$CACHED_USERNAME
+                    CACHED_CREDENTIALS_USED=1
                 fi
-                if [[ -z "$PASSWORD" ]]; then
-                    read -s -p "Password: " PASSWORD
-                    echo
+                if [[ -z "$PASSWORD" && -n "$CACHED_PASSWORD" ]]; then
+                    PASSWORD=$CACHED_PASSWORD
+                    CACHED_CREDENTIALS_USED=1
                 fi
-                AUTH="$USERNAME:$PASSWORD"
             fi
-	else
-		AUTH="$USERNAME:$PASSWORD"
+            if [[ $CACHED_CREDENTIALS_USED -eq 1 ]]; then
+                echo "Using cached login creds..."
+            fi
         fi
+        prompt_missing_credentials
+        AUTH="$USERNAME:$PASSWORD"
 
         if [[ -d "$CHART" ]]; then
-            CHART_PACKAGE="$(helm package "$CHART" | cut -d":" -f2 | tr -d '[:space:]')"
+            if ! PACKAGE_OUTPUT="$("$HELM_BIN" package "$CHART")"; then
+                echo "Failed to package chart: $CHART" >&2
+                exit 1
+            fi
+            if [[ "$PACKAGE_OUTPUT" != *"saved it to: "* ]]; then
+                echo "Could not determine the packaged chart path from Helm output." >&2
+                exit 1
+            fi
+            CHART_PACKAGE="${PACKAGE_OUTPUT#*saved it to: }"
         else
             CHART_PACKAGE="$CHART"
         fi
 
         echo "Pushing $CHART to repo $REPO_URL..."
-        curl -is -u "$AUTH" "$REPO_URL" --upload-file "$CHART_PACKAGE" | indent
+        if ! curl --include --silent --show-error --fail --user "$AUTH" --upload-file "$CHART_PACKAGE" "$REPO_URL" | indent; then
+            echo "Failed to upload chart '$CHART' to repository '$REPO'." >&2
+            exit 1
+        fi
         echo "Done"
         ;;
 esac
