@@ -4,7 +4,7 @@ name: nexus-push
 version: 0.0.1
 runtime: subprocess
 config:
-  usage: Push a chart directory or package to a Nexus Helm repository
+  usage: helm nexus-push [repo] [CHART] [flags]
   shortHelp: Upload Helm charts to Nexus over HTTP(S)
   ignoreFlags: false
 runtimeConfig:
